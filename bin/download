@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GH_REPO="dmno-dev/varlock"
+
+fail() {
+	echo -e "asdf-varlock: $1" >&2
+	exit 1
+}
+
+detect_platform() {
+	local os arch libc
+	os="$(uname -s)"
+	arch="$(uname -m)"
+
+	case "$os" in
+	Darwin) os="macos" ;;
+	Linux) os="linux" ;;
+	*) fail "unsupported OS: $os" ;;
+	esac
+
+	case "$arch" in
+	x86_64 | amd64) arch="x64" ;;
+	arm64 | aarch64) arch="arm64" ;;
+	*) fail "unsupported architecture: $arch" ;;
+	esac
+
+	if [ "$os" = "linux" ]; then
+		# musl vs glibc changes the asset name (varlock-linux-musl-x64 vs varlock-linux-x64)
+		libc=""
+		if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+			libc="musl-"
+		elif [ -f /etc/alpine-release ]; then
+			libc="musl-"
+		fi
+		echo "${os}-${libc}${arch}"
+	else
+		echo "${os}-${arch}"
+	fi
+}
+
+verify_checksum() {
+	local asset="$1" tmp_dir="$2" version="$3"
+	local sums_url expected actual
+
+	sums_url="https://github.com/${GH_REPO}/releases/download/varlock%40${version}/checksums.txt"
+	curl -fsSL -o "${tmp_dir}/checksums.txt" "$sums_url" \
+		|| fail "could not download ${sums_url}"
+
+	expected="$(grep " ${asset}\$" "${tmp_dir}/checksums.txt" | awk '{print $1}')"
+	[ -n "$expected" ] || fail "no checksum entry for ${asset} in checksums.txt"
+
+	if command -v sha256sum >/dev/null 2>&1; then
+		actual="$(sha256sum "${tmp_dir}/${asset}" | awk '{print $1}')"
+	else
+		actual="$(shasum -a 256 "${tmp_dir}/${asset}" | awk '{print $1}')"
+	fi
+
+	[ "$expected" = "$actual" ] \
+		|| fail "checksum mismatch for ${asset}: expected ${expected}, got ${actual}"
+}
+
+download_release() {
+	local version="$1"
+	local download_path="$2"
+	local platform asset url tmp_dir
+
+	platform="$(detect_platform)"
+	asset="varlock-${platform}.tar.gz"
+	url="https://github.com/${GH_REPO}/releases/download/varlock%40${version}/${asset}"
+	tmp_dir="$(mktemp -d)"
+
+	echo "asdf-varlock: downloading ${url}"
+	curl -fsSL -o "${tmp_dir}/${asset}" "$url" \
+		|| fail "could not download ${url}"
+
+	verify_checksum "$asset" "$tmp_dir" "$version"
+
+	mkdir -p "$download_path"
+	tar -xzf "${tmp_dir}/${asset}" -C "$download_path" \
+		|| fail "could not extract ${asset}"
+
+	rm -rf "$tmp_dir"
+}
+
+download_release "$ASDF_INSTALL_VERSION" "$ASDF_DOWNLOAD_PATH"
